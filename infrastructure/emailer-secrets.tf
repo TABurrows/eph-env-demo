@@ -6,6 +6,9 @@ variable "sendgrid_api_key_id" {
 variable "sendgrid_api_key_value" {
   type = string
 }
+variable "sendgrid_location" {
+  type = string
+}
 
 
 # Create Sendgrid API Key Secret
@@ -16,7 +19,7 @@ resource "google_secret_manager_secret" "sendgrid_api_key_secret" {
   replication {
     user_managed {
       replicas {
-        location = "europe-west2"
+        location = var.sendgrid_location
       }
     }
   }

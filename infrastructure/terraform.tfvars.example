@@ -13,6 +13,7 @@ billing_account_id =
 sendgrid_api_key_id      =
 sendgrid_api_key_value   =
 sendgrid_api_endpoint    =
+sendgrid_location        =
 emailer_no_reply_address =
 
 
@@ -30,15 +31,18 @@ mgmnt_project_name      =
 vpc_name      =
 subnet_prefix =
 # VPC Subnet values - override the subnetworking defaults here
-# subnet_zone_names =
-# subnet_zone_cidrs =
+# subnet_zone_names = ["internal"]
+# subnet_zone_cidrs = ["10.1.1.0/24"]
 
 
 # Common Label values - override the label defaults here
 # common_labels = {
-#     cost_centre =
-#     environment =
+#    cost_centre = "eph-envs"
+#    environment = "development"
 # }
+
+# Logging Service Name
+logging_service_agent = 
 
 
 # Common Workflows Service Account Variables
@@ -110,8 +114,6 @@ registrations_workflow_name        =
 registrations_workflow_description =
 registrations_sink_name            =
 registrations_sink_description     =
-# registrations_sink_filter          =
-# registrations_sink_filter          =
 registrations_sink_filter =
 
 
@@ -123,8 +125,6 @@ deletions_workflow_description =
 deletions_sink_name            =
 deletions_sink_description     =
 deletions_sink_filter          =
-# deletions_sink_filter          =
-# deletions_sink_filter         =
 
 
 

@@ -27,6 +27,9 @@ variable "triggers_service_account_description" {
   type = string
 }
 
+variable "logging_service_agent" {
+  type = string
+}
 
 
 
@@ -126,8 +129,9 @@ resource "google_project_iam_binding" "projects_service_agent" {
   project = google_project.management.project_id
   role    = "roles/pubsub.publisher"
 
+  # eg. gcp-sa-logging
   members = [
-    "serviceAccount:service-folder-${replace(google_folder.projects.id, "folders/", "")}@gcp-sa-logging.iam.gserviceaccount.com",
+    "serviceAccount:service-folder-${replace(google_folder.projects.id, "folders/", "")}@${var.logging_service_agent}.iam.gserviceaccount.com",
   ]
 
   depends_on = [

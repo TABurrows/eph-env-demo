@@ -60,27 +60,3 @@ resource "google_compute_subnetwork" "zones" {
   ]
 }
 
-
-
-# =========================================================================
-# Network Controls
-
-# # Allow external to communicate with tagged hosts via ssh
-# resource "google_compute_firewall" "allow_ssh_es_external" {
-#   name    = "allow-ssh-es-external"
-#   network = var.vpc_name
-
-#   allow {
-#     protocol = "tcp"
-#     ports    = ["22"]
-#   }
-
-#   source_ranges = var.allowed_external_ip_addresses
-
-#   target_tags = ["es-access-node", "es-monitor-node"]
-
-#   depends_on = [
-#     google_compute_subnetwork.main
-#   ]
-
-# }
