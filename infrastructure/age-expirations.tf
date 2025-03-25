@@ -64,27 +64,3 @@ resource "google_workflows_workflow" "age_expirations_workflow" {
   ]
 
 }
-
-# # Define Workflow
-# module "age_expirations_workflow" {
-#   source = "./modules/workflow"
-
-#   # Define Workflow values
-#   workflow_name            = 
-#   workflow_project         = google_project.management.project_id
-#   workflow_region          = var.region_id
-#   workflow_description     = 
-#   workflow_service_account = 
-#   workflow_labels          = var.common_labels
-
-
-#   # Import the main workflow YAML file
-#   workflow_yaml_path = "${path.module}/workflows/age.expirations.workflows.yaml"
-
-#   # Dependencies
-#   depends_on = [
-#     google_project_service.workflows,
-#     google_service_account.age_expirations_workflow
-#   ]
-
-# }
