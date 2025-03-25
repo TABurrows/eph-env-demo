@@ -1,0 +1,179 @@
+# ------------------------------------------------------------------------
+# Variable values: terraform.tfvars
+# ------------------------------------------------------------------------
+
+
+# Common Variables
+region_id          =
+root_folder_id     =
+billing_account_id =
+
+
+# Secret Variables
+sendgrid_api_key_id      =
+sendgrid_api_key_value   =
+sendgrid_api_endpoint    =
+emailer_no_reply_address =
+
+
+# Base and Projects Folder variables
+base_folder_name     =
+projects_folder_name =
+
+
+# Management Project variables
+mgmnt_project_id_prefix =
+mgmnt_project_name      =
+
+
+# Management Project Network variables
+vpc_name      =
+subnet_prefix =
+# VPC Subnet values - override the subnetworking defaults here
+# subnet_zone_names =
+# subnet_zone_cidrs =
+
+
+# Common Label values - override the label defaults here
+# common_labels = {
+#     cost_centre =
+#     environment =
+# }
+
+
+# Common Workflows Service Account Variables
+workflows_service_account_name         =
+workflows_service_account_display_name =
+workflows_service_account_description  =
+
+
+# Common Triggers Service Account Variables
+triggers_service_account_name         =
+triggers_service_account_display_name =
+triggers_service_account_description  =
+
+
+# Request Workflow Service Account Variables
+request_workflow_svc_acc_name         =
+request_workflow_svc_acc_display_name =
+request_workflow_svc_acc_description  =
+
+
+# Create Workflow Service Account Variables
+create_workflow_svc_acc_name         =
+create_workflow_svc_acc_display_name =
+create_workflow_svc_acc_description  =
+
+
+# On-Demand Delete Workflow Service Account Variables
+delete_workflow_svc_acc_name         =
+delete_workflow_svc_acc_display_name =
+delete_workflow_svc_acc_description  =
+
+
+# Email Workflow Service Account Variables
+email_workflow_svc_acc_name         =
+email_workflow_svc_acc_display_name =
+email_workflow_svc_acc_description  =
+
+
+# Age Milestones Workflow Service Account Variables
+age_milestones_workflow_svc_acc_name         =
+age_milestones_workflow_svc_acc_display_name =
+age_milestones_workflow_svc_acc_description  =
+
+
+# Age Notifications Workflow Service Account Variables
+age_notifications_workflow_svc_acc_name         =
+age_notifications_workflow_svc_acc_dipslay_name =
+age_notifications_workflow_svc_acc_description  =
+
+
+# Age Expirations Workflow Service Account Variables
+age_expirations_workflow_svc_acc_name         =
+age_expirations_workflow_svc_acc_dipslay_name =
+age_expirations_workflow_svc_acc_description  =
+
+
+# Age Scheduler Service Account Variables
+age_scheduler_svc_acc_name         =
+age_scheduler_svc_acc_display_name =
+age_scheduler_svc_acc_description  =
+
+
+
+
+# Registrations Workflow Variables
+registrations_topic_name           =
+registrations_trigger_name         =
+registrations_workflow_name        =
+registrations_workflow_description =
+registrations_sink_name            =
+registrations_sink_description     =
+# registrations_sink_filter          =
+# registrations_sink_filter          =
+registrations_sink_filter =
+
+
+# Deletions Workflow Variables
+deletions_topic_name           =
+deletions_trigger_name         =
+deletions_workflow_name        =
+deletions_workflow_description =
+deletions_sink_name            =
+deletions_sink_description     =
+deletions_sink_filter          =
+# deletions_sink_filter          =
+# deletions_sink_filter         =
+
+
+
+
+# Request Workflow Variables
+request_workflow_name        =
+request_workflow_description =
+
+
+# Create Workflow Variables
+create_workflow_name        =
+create_workflow_description =
+
+
+# Delete Workflow Variables
+delete_workflow_name        =
+delete_workflow_description =
+
+
+# Email Sender Workflow Variables
+email_workflow_name        =
+email_workflow_description =
+
+
+# Age Milestones Workflow Variables
+age_milestones_workflow_name        =
+age_milestones_workflow_description =
+
+
+# Age Notifications Workflow Variables
+age_notifications_workflow_name        =
+age_notifications_workflow_description =
+
+
+# Age Expirations Workflow Variables
+age_expirations_workflow_name        =
+age_expirations_workflow_description =
+
+
+
+# Define Age Scheduler Variables
+age_scheduler_job_name        =
+age_scheduler_job_description =
+age_scheduler_job_schedule    =
+age_scheduler_job_time_zone   =
+# age_scheduler_job_attempt_deadline =
+
+
+
+# Define Variables to be applied to Ephemeral Environments
+registrant_iam_role_grant  =
+eph_env_billing_account_id =

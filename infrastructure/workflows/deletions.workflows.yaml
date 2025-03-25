@@ -1,0 +1,228 @@
+# deletions.workflows.yaml
+main:
+
+  params: [event]
+  steps:
+
+    # Initialize
+    - initialize:
+        assign:
+           
+           # Input Values
+           - base64: $${ base64.decode(event.data.message.data) }
+           - message: $${ text.decode(base64) }
+           - source: $${ json.decode(message) }
+           - event_time: $${ time.format(sys.now()) }
+
+           # Static Values
+           - email_workflow_id: $${ "${eph_env_email_workflow_id}" }
+           
+           # Dynamic Values
+           - this_project_id: $${ sys.get_env("GOOGLE_CLOUD_PROJECT_ID") }
+           - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+           
+           # Input Values
+           - deleted_project_id: $${ default( map.get( source, ["protoPayload","resourceName"]), "MISSING" )}
+           - fetched_registrant_email: $${ "MISSING" }
+           
+           # Firestore Values
+           - deletions_document: $${ deleted_project_id }
+           - deletions_collection: $${ "deletions" }
+           - registrations_document: $${ deleted_project_id }
+           - registrations_collection: $${ "registrations" }
+           - requests_document: $${ text.replace_all(deleted_project_id, "projects/", "") }
+           - requests_collection: $${ "requests" }
+           - datastore: $${ "projects/" + this_project_id + "/databases/(default)/documents/ephenvs" }
+           
+           # Emailer Workflow Values
+           - email_workflow_project_id: $${ sys.get_env("GOOGLE_CLOUD_PROJECT_ID") }
+           - email_workflow_location: $${ sys.get_env("GOOGLE_CLOUD_LOCATION") }
+           
+           # Log Values
+           - now_timestamp: $${ sys.now() }
+           - log_status: $${ "INFO" }
+           - log_message: $${ "workflow started" }
+           - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+           - log_detail: null
+           - workflow_result: null
+           
+
+    # Test the input values
+    - check_input_values:
+        switch:
+          - condition: $${ deleted_project_id == "MISSING" }
+            assign:
+              - log_status: $${ "INFO" }
+              - log_message: '$${ "[" + deleted_project_id + "], ignoring the event as deleted_project_id is invalid"}'
+            next: write_to_log
+          # All tests have passed
+          - condition: true
+            next: fetch_registration_details
+
+
+    # Fetch registration details
+    - fetch_registration_details:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.get
+          args:
+            name: $${ datastore + "/" + registrations_collection + "/" + registrations_document }
+          result: fetch_request_details_result
+        except:
+          as: e
+          steps:
+            - handle_fetch_registration_details_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + deleted_project_id + "] could not fetch registration data from Firestore with: " + json.encode_to_string(e)}'
+                next: write_to_log
+              
+                
+    # Extract email address from the returned Firestore document
+    - extract_registration_data:
+        steps:
+          - set_registration_contact:
+              assign:
+                - fetched_registrant_email: $${ default( map.get(fetch_request_details_result, ["fields","registrant_email","stringValue"]), "MISSING" )}
+                - fetched_registrant_user: $${ default( map.get(fetch_request_details_result, ["fields","registrant_user","stringValue"]), "MISSING" )}
+
+
+    # Check that the registrant email address value is present
+    - check_registration_data:
+        switch:
+          - condition: $${ fetched_registrant_email == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + deleted_project_id + "], the fetched registration contact was missing from the fetched registration data" }'
+            next: write_to_log
+          - condition: $${ fetched_registrant_user == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + deleted_project_id + "], the fetched registration user was missing from the fetched registration data" }'
+            next: write_to_log
+          - condition: true
+            next: write_deletion_details
+
+
+    # Write the gathered details to Firestore
+    - write_deletion_details:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.patch
+          args:
+            name: $${ datastore + "/" + deletions_collection + "/" + deletions_document }
+            body:
+              fields:
+                deletion_event_received: 
+                  stringValue: $${ event_time }
+                deletion_event_project_id: 
+                  stringValue: $${ deleted_project_id }
+                deletion_event_contact:
+                  stringValue: $${ fetched_registrant_email }
+                deletion_event_user:
+                  stringValue: $${ fetched_registrant_user }
+                ## Uncomment below for debug
+                # event_message:
+                #   stringValue: $${ message }
+        except:
+          as: e
+          steps:
+            - handle_write_deletion_details_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + deleted_project_id + "], could not write deletion details to Firestore with: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+    # Remove registration details
+    - remove_registration_details:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.delete
+          args:
+            name: $${ datastore + "/" + registrations_collection + "/" + registrations_document }
+        except:
+          as: e
+          steps:
+            - handle_remove_registration_details_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + deleted_project_id + "] could not delete registrations document " + registrations_document + " from Firestore with: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+    # Remove delete request details from Firebase
+    - remove_request_details:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.delete
+          args:
+            name: $${ datastore + "/" + requests_collection + "/deletions/" + requests_document }
+        except:
+          as: e
+          steps:
+            - handle_remove_request_details_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "Could not remove delete request document " + requests_document + " from Firestore with error: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+    # Send email to registrant contact
+    - send_email_to_registrant:
+        try:
+          # Call the Email Workflow
+          call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.run
+          args:
+            workflow_id: $${ email_workflow_id }
+            location: $${ email_workflow_location }
+            project_id: $${ email_workflow_project_id }
+            argument:
+              recipient: $${ fetched_registrant_email }
+              subject: $${ "Your project " + deleted_project_id + " has been shutdown" }
+              body: $${ "Your project " + deleted_project_id + " has been shutdown and is no longer available for use." }
+        except:
+          as: e
+          steps:
+            - handle_send_email_to_registrant_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + deleted_project_id + "] could not call email notification workflow" }'
+                next: write_to_log
+
+
+    # Prepare success log message
+    - prepare_success_log:
+        steps:
+          - set_success_log_message:
+              assign:
+                - log_message: $${ "Workflow completed successfully" }
+
+
+    # Write message to log
+    - write_to_log:
+        steps:
+          - build_log_entry:
+              assign:
+                - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+                - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+                - workflow_result:
+                    status: $${ log_status }
+                    message: $${ log_message }
+                    elapsed_time: $${ time_elapsed + " seconds" }
+                    workflow_id: $${ this_workflow_id }
+                    deleted_project_id: $${ deleted_project_id }
+                    registrant_email: $${ fetched_registrant_email }
+                    registrant_user: $${ fetched_registrant_user }
+                    execution_id: $${ execution_id }
+
+          - call_sys_log:
+              call: sys.log
+              args:
+                  severity: $${ log_status }
+                  json: $${ workflow_result }
+              next: exit
+
+
+    # Final step
+    - exit:
+        switch:
+          - condition: $${ log_status == "ERROR" }
+            raise: $${ workflow_result }
+          - condition: true
+            return: $${ workflow_result }

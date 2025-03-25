@@ -1,0 +1,175 @@
+# age.notifications.workflows.yaml
+main:
+
+  params: [input]
+  steps:
+
+    # Initialize
+    - init:
+        assign:
+            # Input Values
+          - expiry_timestamp: $${ default( map.get(input, ["expiry_timestamp"]), "MISSING" )}
+          - project_id: $${ default( map.get(input, ["project_id"]), "MISSING" )}
+          - registrant_email: $${ default( map.get(input, ["registrant_email"]), "MISSING" )}
+          # Email Workflow Values
+          - email_workflow_project_id: $${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - email_workflow_location: $${sys.get_env("GOOGLE_CLOUD_LOCATION")}
+          - email_workflow_id: $${ "${send_email_workflow_id}" }
+          # Dynamic Values
+          - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+          # Email Message Values
+          - email_subject: $${ "MISSING" }
+          - email_message: $${ "MISSING" }
+          # Log Values
+          - now_timestamp: $${ sys.now() }
+          - log_status: $${ "INFO" }
+          - log_message: $${ "workflow started" }
+          - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+          - log_detail: null
+          - workflow_result: null
+           
+
+    # Test the input values are present
+    - check_input_values:
+        switch:
+          - condition: $${ expiry_timestamp == "MISSING"}
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: $${ "[" + project_id + "], input is missing an expiry_timestamp" }
+            next: write_to_log
+          - condition: $${ project_id == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: $${ "[" + project_id + "], input is missing a project_id" }
+            next: write_to_log
+          - condition: $${ registrant_email == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: $${ "[" + project_id + "], input is missing a registrant_email" }
+            next: write_to_log
+          - condition: true
+            next: extract_expiration_timestamp
+
+
+    # Try to extract an expiration epoch timestamp from the given value
+    - extract_expiration_timestamp:
+        try:
+          assign:
+            - expiry_timestamp: $${ time.parse(input.expiry_timestamp) }
+        except:
+          as: e
+          steps:
+            - handle_expiration_time_error:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: $${ "[" + project_id + "] could not extract an expiration timestamp from the input"}
+                next: write_to_log
+
+
+    # Test to see if the project has expired
+    - build_expiration_time_string:
+        try:
+          steps:
+            - get_time_unit_values:  
+                assign:
+                  - one_minute_in_secs: $${ 60 }
+                  - one_hour_in_secs: $${ 60 * one_minute_in_secs }
+                  - one_day_in_secs: $${ 24 * one_hour_in_secs }
+                  - expires_in_secs: $${  expiry_timestamp - now_timestamp }
+                  - number_of_days: $${ int( expires_in_secs / one_day_in_secs ) }
+                  - number_of_hours: $${ int( ( expires_in_secs - (number_of_days * one_day_in_secs) ) / one_hour_in_secs ) }
+                  - number_of_minutes: $${ int( ( expires_in_secs - (number_of_days * one_day_in_secs) - (number_of_hours * one_hour_in_secs) ) / one_minute_in_secs) }
+                  - days_label: $${ "days" }
+                  - hours_label: $${ "hours" }
+                  - minutes_label: $${ "minutes" }
+                  - expiration_message: $${ "" }
+              # handle pluralization
+            - get_time_unit_labels:
+                switch:
+                  - condition: $${ number_of_days == 1 }
+                    assign:
+                      - days_label: $${ "day" }
+                  - condition: $${ number_of_hours == 1 }
+                    assign:
+                      - hours_label: $${ "hour" }
+                  - condition: $${ number_of_minutes == 1 }
+                    assign:
+                      - minutes_label: $${ "minute" }
+              # Now build the outbound messages
+            - build_email_message:
+                assign:
+                  - log_status: $${ "INFO" }
+                  - email_subject: '$${ "Project Status: " + project_id }'
+                  - expiration_message: $${ " " + project_id + " expires in " + number_of_days + " " + days_label + ", " + number_of_hours +  " " + hours_label + " and " + number_of_minutes + " " + minutes_label + "."}
+                  - email_message: '$${ "Your project" + expiration_message }'
+                  - log_message: '$${ "[" + project_id + "]" + expiration_message }'
+        except:
+          as: e
+          steps:
+            - handle_expiration_string_error:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: $${ "[" + project_id + "] could not build an expiration time string from provided values"}
+                next: write_to_log
+
+
+    # Call Email Sender Workflow
+    - send_notification_via_workflow:
+        try:
+          # Call the Email Workflow
+          call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.run
+          args:
+            workflow_id: $${ email_workflow_id }
+            location: $${ email_workflow_location }
+            project_id: $${ email_workflow_project_id }
+            argument:
+              recipient: $${ registrant_email }
+              subject: $${ email_subject }
+              body: $${ email_message }
+        except:
+          as: e
+          steps:
+            - handle_send_notification_via_workflow_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + project_id + "] caught exception whilst trying to call email workflow with: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+    # Prepare success log message
+    - prepare_success_log:
+        steps:
+          - set_success_log_message:
+              assign:
+                - log_message: $${ "Workflow completed successfully"}
+
+
+    # Write message to log
+    - write_to_log:
+        steps:
+          - build_log_entry:
+              assign:
+                - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+                - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+                - workflow_result:
+                    status: $${ log_status }
+                    message: $${ log_message }
+                    elapsed_time: $${ time_elapsed + " seconds" }
+                    workflow_id: $${ this_workflow_id }
+                    execution_id: $${ execution_id }
+          
+          - call_sys_log:
+              call: sys.log
+              args:
+                  severity: $${ log_status }
+                  json: $${ workflow_result }
+              next: exit
+
+
+    # Final step
+    - exit:
+        switch:
+          - condition: $${ log_status == "ERROR" }
+            raise: $${ workflow_result }
+          - condition: true
+            return: $${ workflow_result }

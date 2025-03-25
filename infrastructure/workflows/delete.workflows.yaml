@@ -1,0 +1,214 @@
+# delete.workflows.yaml
+main:
+
+  params: [args]
+  steps:
+
+  # Initialize
+  - initialize:
+      assign:
+        # Input Values
+        - registration_id: $${ default( map.get(args, ["registration_id"]), "MISSING" )}
+        - project_id: $${ default( map.get(args, ["project_id"]), "MISSING" )}
+        # Static Values
+        # Dynamic Values
+        - this_project_id: $${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+        - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+        - event_formatted_time: $${ time.format(sys.now()) }
+        - fetched_registration_id: $${ "MISSING" }
+        - delete_operation_detail: $${ null }
+        # Firestore Values
+        - deletions_document: $${project_id}
+        - deletions_collection: $${"requests"}
+        - registrations_document: $${project_id}
+        - registrations_collection: $${"registrations"}
+        - datastore: $${"projects/" + this_project_id + "/databases/(default)/documents/ephenvs"}
+        # Log Values
+        - now_timestamp: $${ sys.now() }
+        - log_status: $${ "INFO" }
+        - log_message: $${ "workflow started" }
+        - log_detail: null
+        - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+        - delete_operation_id: null
+        - delete_operation_detail: null
+        - workflow_result: null
+        
+        
+  # Test the input values
+  - check_input_values:
+      switch:
+        - condition: $${ registration_id == "MISSING" }
+          assign:
+            - log_status: $${ "ERROR" }
+            - log_message: '$${ "Missing registration_id from input"}'
+          next: write_to_log
+        - condition: $${ project_id == "MISSING" }
+          assign:
+            - log_status: $${ "ERROR" }
+            - log_message: '$${ "Missing project_id from input"}'
+          next: write_to_log
+        - condition: true
+          next: fetch_registration_data
+
+
+  # Fetch Registration details for the project_id
+  - fetch_registration_data:
+      try:
+        call: googleapis.firestore.v1.projects.databases.documents.get
+        args:
+          name: $${ datastore + "/" + registrations_collection + "/projects/" + registrations_document}
+        result: fetched_registration_values
+      except:
+        as: e
+        steps:
+          - handle_fetch_registration_data_exception:
+              assign:
+                - log_status: $${ "ERROR" }
+                - log_message: '$${ "[" + project_id + "] could not get registration data from Firestore with: " + json.encode_to_string(e) }'
+              next: write_to_log
+
+
+  # Extract registration_id from fetched values
+  - extract_registration_id:
+      steps:
+        - extract:
+            assign:
+              - fetched_registration_id: $${ default( map.get(fetched_registration_values, ["fields","registration_id","stringValue"]), "MISSING" )}
+
+
+  # Check that a registration_id was returned from the datastore
+  - check_extract_registration_id:
+      switch:
+        - condition: $${ fetched_registration_id == "MISSING" }
+          assign:
+            - log_status: $${ "ERROR" }
+            - log_message: '$${ "[" + project_id + "] could not extract a registration_id from fetched data"}'
+          next: write_to_log
+        - condition: true
+          next: compare_registration_ids
+
+
+  # Check fetched and input registration_ids match
+  - compare_registration_ids:
+      switch:
+        - condition: $${ fetched_registration_id != registration_id }
+          assign:
+            - log_status: $${ "ERROR" }
+            - log_message: '$${ "Could not match the registration_id with the fetched_registration_id" }'
+          next: write_to_log
+        - condition: true
+          next: request_project_deletion
+
+
+  # Request project deletion
+  - request_project_deletion:
+      steps:
+        - call_project_delete:
+            try:
+              call: googleapis.cloudresourcemanager.v3.projects.delete
+              args:
+                name: $${ "projects/" + project_id }
+              result: delete_api_call_response
+            except:
+              as: e
+              steps:
+                - handle_request_project_deletion_exception:
+                    assign:
+                      - log_status: $${ "ERROR" }
+                      - log_message: '$${ "Caught exception trying to call the Project Delete API"}'
+                      - log_detail:
+                          tags: $${ e.tags }
+                          message: $${ e.message }
+                          exception: $${ json.decode(json.encode_to_string(e)) }
+                    next: write_to_log
+        - extract_delete_project_operation_id:
+            assign:
+              - delete_operation_id: $${ default(map.get(delete_api_call_response,"name"), "MISSING") }
+              - delete_operation_detail: $${ delete_api_call_response }
+        - test_delete_project_operation_id:
+            switch:
+              - condition: $${ delete_operation_id == "MISSING" }
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "Could not extract a Delete Operation ID from Delete Project API call" }'
+                next: write_to_log
+              - condition: true
+                next: write_details
+
+
+  # Write deletions request details to Firestore
+  - write_details:
+      try:
+        call: googleapis.firestore.v1.projects.databases.documents.patch
+        args:
+          name: $${datastore + "/" + deletions_collection + "/deletions/" + deletions_document}
+          body:
+            fields:
+              delete_timestamp: 
+                stringValue: $${ event_formatted_time }
+              requested_project_id:
+                stringValue: $${ project_id }
+              registration_id:
+                stringValue: $${ registration_id }
+              execution_id:
+                stringValue: $${ execution_id }
+              delete_operation_id:
+                stringValue: $${ delete_operation_id }
+              delete_operation_detail:
+                stringValue: $${ json.encode_to_string(delete_operation_detail) }
+              ## Uncomment below for debug
+              # workflow_input: 
+              #   stringValue: $${ json.encode_to_string(args) }
+      except:
+        as: e 
+        steps:
+          - handle_write_deletions_details:
+              assign:
+                - log_status: $${ "ERROR" }
+                - log_message: '$${ "[" + project_id + "] caught exception writing deletions"}'
+    
+
+  # Prepare success log message
+  - prepare_success_log:
+      steps:
+        - set_success_log_message:
+            assign:
+              - log_message: '$${ "Workflow execution " + execution_id + " completed successfully with operation ID: " + delete_operation_id }'
+
+
+
+    # Write message to log
+  - write_to_log:
+      steps:
+        - build_log_line:
+            assign:
+              - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+              - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+              - workflow_result:
+                  status: $${ log_status }
+                  message: $${ log_message }
+                  detail: $${ log_detail }
+                  elapsed_time: $${ time_elapsed + " seconds" }
+                  workflow_id: $${ this_workflow_id }
+                  project_id: $${ project_id }
+                  registration_id: $${ registration_id }
+                  execution_id: $${ execution_id }
+                  delete_operation_id: $${ delete_operation_id }
+                  delete_operation_detail: $${ delete_operation_detail }
+                  # workflow_input: $${ args }
+
+        - call_sys_log:
+            call: sys.log
+            args:
+                severity: $${ log_status }
+                json: $${ workflow_result }
+            next: exit
+
+
+    # Final step
+  - exit:
+      switch:
+        - condition: $${ log_status == "ERROR" }
+          raise: $${ workflow_result }
+        - condition: true
+          return: $${ workflow_result }

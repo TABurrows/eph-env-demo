@@ -1,0 +1,347 @@
+# registrations.workflows.yaml
+main:
+
+  params: [event]
+  steps:
+
+    # Initialize
+    - init:
+        assign:
+
+           # Extract Event
+           - base64: $${ base64.decode(event.data.message.data) }
+        
+           # Static Values
+           - registrant_iam_role: $${ "${registrant_iam_role}" }
+           - billing_account_name: $${ "${billing_account_id}" }
+        
+           # Dynamic Values
+           - message: $${ text.decode(base64) }
+           - source: $${ json.decode(message) }
+           - timestamp_now: $${ time.format(sys.now()) }
+           - this_project_id: $${ sys.get_env("GOOGLE_CLOUD_PROJECT_ID") }
+           - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+        
+           # Input Values
+           - created_project_registration_id: $${ default( map.get( source, ["protoPayload","request","project","labels","registration_id"]), "MISSING" )}
+           - created_project_state: $${ default( map.get( source, ["protoPayload","request","project","state"]), "MISSING" )}
+           - created_project_timestamp: $${ default( map.get(source, ["protoPayload","request","project","createTime"]), "MISSING" )}
+           - created_project_id: $${ default( map.get(source, ["protoPayload","request","project","projectId"]), "MISSING" )}
+        
+           # Firestore Values
+           - registrations_document: $${ created_project_id }
+           - registrations_collection: $${ "registrations" }
+           - requests_collection: $${ "create" }
+           - requests_document: $${ created_project_registration_id }
+           - requests_collection: $${ "requests" }
+           - datastore: $${ "projects/" + this_project_id + "/databases/(default)/documents/ephenvs"}
+           - fetched_registrant_email: $${ "MISSING" }
+           - fetched_expiration_timestamp: $${ "MISSING" }
+        
+           # Email Workflow Values
+           - email_workflow_project_id: $${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+           - email_workflow_location: $${sys.get_env("GOOGLE_CLOUD_LOCATION")}
+           - email_workflow_id: $${"eph-env-send-email"}
+        
+            # Log Values
+           - now_timestamp: $${ sys.now() }
+           - log_status: $${ "INFO" }
+           - log_message: $${ "workflow started" }
+           - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+           - log_detail: null
+           - operation_id: null
+           - workflow_result: null
+        
+           # IAM Policy Values
+           - next_iam_policy: $${ null }
+ 
+
+    # Test the input values
+    - check_input_values:
+        switch:
+          - condition: $${ created_project_registration_id == "MISSING" }
+            assign:
+              - log_status: $${ "INFO" }
+              - log_message: '$${ "[" + created_project_id + "], ignoring registration request as the project has no registration_id label" }'
+            next: write_to_log
+          - condition: $${ created_project_id == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + created_project_id + "], input is missing or invalid for created_project_id" }'          
+            next: write_to_log
+          - condition: $${ created_project_state == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + created_project_id + "], input is missing or invalid for created_project_state" }'     
+            next: write_to_log
+          - condition: $${ created_project_timestamp == "MISSING" }
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + created_project_id + "], input is missing or invalid for created_project_timestamp" }'    
+            next: write_to_log
+          # All tests have passed
+          - condition: true
+            next: fetch_request_data
+
+
+    # Fetch request details from Firestore
+    - fetch_request_data:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.get
+          args:
+            name: $${ datastore + "/" + requests_collection + "/creations/" + requests_document }
+          result: fetched_request_data
+        except:
+          as: e
+          steps:
+            - handle_fetch_request_data_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + created_project_id + "] could not get request data from Firestore with error: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+    # Extract email address from the returned Firestore document
+    - extract_request_data:
+        steps:
+          - set_request_data:
+              assign:
+                - fetched_registrant_email: $${ default( map.get(fetched_request_data, ["fields","registrant_email","stringValue"]), "MISSING" )}
+                - fetched_registrant_user: $${ default( map.get(fetched_request_data, ["fields","registrant_user","stringValue"]), "MISSING" )}
+                - fetched_expiration_timestamp: $${ default( map.get( fetched_request_data, ["fields","expiration_timestamp","stringValue"]), "MISSING" )}
+
+
+    # Check that the registrant email address value is present
+    - check_extract_request_data:
+        switch:
+          - condition: $${ fetched_registrant_email == "MISSING" }
+            assign: 
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + created_project_id + "] Invalid or missing registrant email value from fetched data"}'
+            next: write_to_log
+          - condition: $${ fetched_registrant_user == "MISSING" }
+            assign: 
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + created_project_id + "] Invalid or missing registrant user value from fetched data"}'
+            next: write_to_log
+          - condition: $${ fetched_expiration_timestamp == "MISSING" }
+            assign: 
+              - log_status: $${ "ERROR" }
+              - log_message: '$${ "[" + created_project_id + "] Invalid or missing  value from fetched data"}'
+            next: write_to_log
+          - condition: true
+            next: apply_iam_policy
+            
+            
+    # Apply IAM Policy to Project
+    - apply_iam_policy:
+        steps:
+          # Fetch an existing IAM Policy to be updated
+          - fetch_iam_policy:
+              try:
+                call:  googleapis.cloudresourcemanager.v1.projects.getIamPolicy
+                args:
+                  resource: $${ created_project_id }
+                  body:
+                    options:
+                      requestedPolicyVersion: $${ 1 }
+                result: fetched_iam_policy
+              except:
+                as: e
+                steps:
+                  - handle_fetch_iam_policy_exception:
+                      assign:
+                        - log_status: $${ "ERROR" }
+                        - log_message: '$${ "[" + created_project_id + "] could not read IAM Policy with: " + json.encode_to_string(e) }'
+                      next: write_to_log
+          # Build the new IAM Policy from the fetched policy
+          - handle_iam_policy_fetch:
+              assign:
+                - iam_binding:
+                    members: '$${ ["user:" + fetched_registrant_user] }'
+                    role: $${ registrant_iam_role }
+                - iam_bindings: $${ list.concat(map.get(fetched_iam_policy, "bindings"), iam_binding) }
+                - fetched_iam_policy.bindings: $${ iam_bindings }
+                - next_iam_policy: $${ fetched_iam_policy }
+          # Now Write the new IAM Policy to newly created Project
+          - write_iam_policy:    
+              try:
+                call:  googleapis.cloudresourcemanager.v1.projects.setIamPolicy
+                args:
+                  resource: $${ created_project_id }
+                  body:
+                    policy: $${ next_iam_policy }
+                result: write_iam_policy_result
+              except:
+                as: e
+                steps:
+                  - handle_write_iam_policy_exception:
+                      assign:
+                        - log_status: $${ "ERROR" }
+                        - log_message: '$${ "[" + created_project_id + "] could not write IAM Policy with: " + json.encode_to_string(e) }'
+                      next: write_to_log
+                  
+
+    # Associate Billing Account to newly created project
+    - associate_billing_account:
+        try:
+          call: http.put
+          args:
+              url: '$${ "https://cloudbilling.googleapis.com/v1/projects/" + created_project_id + "/billingInfo" }'
+              auth:
+                  type: OAuth2
+              body:
+                billingAccountName: $${ billing_account_name }
+          result: assign_billing_account_result
+        except:
+          as: e
+          steps:
+            - handle_assign_billing_account_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + created_project_id + "] could not assign Billing Account with: " + json.encode_to_string(e) }'
+                next: write_to_log
+
+
+    # Enable Service APIs in newly created project
+    # - enable_service_apis:
+    #     steps:
+          # - enable_service_usage_api:
+          #     try:
+          #       call: http.post
+          #       args:
+          #           url: '$${ "https://serviceusage.googleapis.com/v1/projects/" + created_project_id + "/services/serviceusage.googleapis.com:enable" }'
+          #           auth:
+          #               type: OAuth2
+          #       result: enable_services_api_result
+          #     except:
+          #       as: e
+          #       steps:
+          #         - handle_enable_services_api_exception:
+          #             assign:
+          #               - log_status: $${ "ERROR" }
+          #               - log_message: '$${ "[" + created_project_id + "] could not enable Service Usage API on project with: " + json.encode_to_string(e) }'
+          #             next: write_to_log
+
+
+
+    # Write collected details to Firestore
+    - write_registration_data:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.patch
+          args:
+            name: $${datastore + "/" + registrations_collection + "/projects/"  + registrations_document}
+            body:
+              fields:
+                event_received:
+                  stringValue: $${ timestamp_now }
+                registration_state:
+                  stringValue: $${ created_project_state }
+                project_id:
+                  stringValue: $${ registrations_document }
+                creation_timestamp: 
+                  stringValue: $${ created_project_timestamp }
+                registration_id: 
+                  stringValue: $${ created_project_registration_id }
+                execution_id:
+                  stringValue: $${ execution_id }
+                registrant_email:
+                  stringValue: $${ fetched_registrant_email }
+                registrant_user:
+                  stringValue: $${ fetched_registrant_user }
+                expiration_timestamp:
+                  stringValue: $${ fetched_expiration_timestamp }
+                ## Uncomment below for debug
+                # event_message: 
+                #   stringValue: $${ message }
+        except:
+          as: e
+          steps:
+            - handle_write_registration_data_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + created_project_id + "] could not write to Firestore with error: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+
+    # Remove create request details from Firebase
+    - remove_request_details:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.delete
+          args:
+            name: $${ datastore + "/" + requests_collection + "/creations/" + requests_document }
+        except:
+          as: e
+          steps:
+            - handle_remove_request_details_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "Could not remove create request document " + requests_document + " from Firestore with error: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+    # Send email to registrant
+    - send_email_to_registrant:
+        try:
+          # Call the Email Sender Workflow
+          call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.run
+          args:
+            workflow_id: $${ email_workflow_id }
+            location: $${ email_workflow_location }
+            project_id: $${ email_workflow_project_id }
+            argument:
+              recipient: $${ fetched_registrant_email }
+              subject: $${ "Your project " + created_project_id + " is ready" }
+              body: '$${ "Your project " + created_project_id + " has been created and is now ready to use. The project will expire on " + fetched_expiration_timestamp + "." }'
+        except:
+          as: e
+          steps:
+            - handle_send_email_to_registrant_exception:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "[" + created_project_id + "] could not call email workflow with error: " + json.encode_to_string(e)}'
+                next: write_to_log
+
+
+    # Prepare success log message
+    - prepare_success_log:
+        steps:
+          - set_success_log_message:
+              assign:
+                - log_message: '$${ "Workflow execution " + execution_id + " completed successfully for project ID: " + created_project_id }' 
+
+
+    # Write message to log
+    - write_to_log:
+        steps:
+          - build_log_entry:
+              assign:
+                - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+                - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+                - workflow_result:
+                    status: $${ log_status }
+                    message: $${ log_message }
+                    elapsed_time: $${ time_elapsed + " seconds" }
+                    workflow_id: $${ this_workflow_id }
+                    created_project_id: $${ created_project_id }
+                    created_project_state: $${ created_project_state }
+                    registrant_email: $${ fetched_registrant_email }
+                    registrant_user: $${ fetched_registrant_user }
+                    execution_id: $${ execution_id }
+
+          - call_sys_log:
+              call: sys.log
+              args:
+                  severity: $${ log_status }
+                  json: $${ workflow_result }
+              next: exit
+
+
+    # Final step
+    - exit:
+        switch:
+          - condition: $${ log_status == "ERROR" }
+            raise: $${ workflow_result }
+          - condition: true
+            return: $${ workflow_result }

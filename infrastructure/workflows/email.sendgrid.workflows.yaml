@@ -1,0 +1,165 @@
+# email.sendgrid.workflows.yaml
+main:
+
+    params: [input]
+    steps:
+
+    # Initialize
+    - initialize:
+        assign:
+            # Input Values
+            - message_recipient: $${ default( map.get(input, ["recipient"]), "MISSING" )}
+            - message_subject: $${ default( map.get(input, ["subject"]), "MISSING" )}
+            - message_body: $${ default( map.get(input, ["body"]), "MISSING" )}
+            # Static Values
+            - message_sender: $${ "${emailer_no_reply_address}" }
+            - sendgrid_endpoint: $${ "${sendgrid_api_endpoint}" }
+            - sendgrid_api_secret_id: $${ "${sendgrid_api_key_id}" }
+            - allowed_email_domain: $${ "${allowed_email_domain}" }
+            - sendgrid_api_secret_version: $${"latest"}
+            # Dynamic Values
+            - now_timestamp: $${ sys.now() }
+            - this_project_id: $${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+            - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+            # Log Values
+            - log_status: $${ "INFO" }
+            - log_message: $${ "workflow started" }
+            - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+            - log_detail: null
+            - workflow_result: null
+            
+
+    # Test the input values are present
+    - check_input_values:
+        switch:
+          - condition: $${ message_recipient == "MISSING"}
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: $${ "the message_recipient value is missing from the workflow input" }
+            next: write_to_log
+          - condition: $${ message_subject == "MISSING"}
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: $${ "the message_subject value is missing from the workflow input" }
+            next: write_to_log
+          - condition: $${ message_body == "MISSING"}
+            assign:
+              - log_status: $${ "ERROR" }
+              - log_message: $${ "the message_body value is missing from the workflow input" }
+            next: write_to_log
+          - condition: true
+            next: get_api_key_secret
+
+
+    # TODO: test to ensure email message_recipient has the correct email domain name
+    # - check_email_message_recipient: 
+    #     switch:
+    #         - condition: $${ == allowed_email_domain }
+
+
+    # Get the Sendgrid API key from Secrets
+    - get_api_key_secret:
+        try:
+            call: googleapis.secretmanager.v1.projects.secrets.versions.accessString
+            args:
+                secret_id: $${ sendgrid_api_secret_id }
+                version: $${ sendgrid_api_secret_version }
+                project_id: $${ this_project_id }
+            result: sendgrid_api_key
+        except:
+            as: e
+            steps:
+                - handle_get_api_key_secret_exception:
+                    assign:
+                        - log_status: $${ "ERROR" }
+                        - log_message: '$${ "Failed to get API Key from Secrets with: " + json.encode_to_string(e)}'
+                    next: write_to_log
+
+
+    # Send the message via Sendgrid
+    - send_email_via_api:
+        try:
+            call: http.post
+            args:
+                url: $${sendgrid_endpoint}
+                headers:
+                    Content-Type: "application/json"
+                    Authorization: $${"Bearer " + sendgrid_api_key}
+                body:
+                    personalizations:
+                        - to:
+                            - email: $${message_recipient}
+                    from:
+                        email: $${message_sender}
+                    subject: $${message_subject}
+                    content:
+                        - type: "text/plain"
+                          value: $${message_body}
+            result: sendgrid_result
+        except:
+            as: e
+            steps:
+                - handle_send_email_via_api_exception:
+                    switch:
+                      - condition: $${ not("HttpError" in e.tags) }
+                        assign:
+                            - log_status: $${ "ERROR" }
+                            - log_message: '$${ "Problem connecting to Sendgrid API with: " + json.encode_to_string(e)}'
+                        next: write_to_log
+                      - condition: $${ e.code == 404 }
+                        assign:
+                          - log_status: $${ "ERROR" }
+                          - log_message: '$${ "URL not found connecting to Sendgrid API with: " + json.encode_to_string(e)}'
+                        next: write_to_log
+                      - condition: $${ e.code == 403 }
+                        assign:
+                          - log_status: $${ "ERROR" }
+                          - log_message: '$${ "Authentication problem connecting to Sendgrid API with: " + json.encode_to_string(e)}'
+                        next: write_to_log
+                      - condition: true
+                        assign:
+                          - log_status: $${ "ERROR" }
+                          - log_message: '$${ "Caught exception connecting to Sendgrid API with: " + json.encode_to_string(e)}'
+                        next: write_to_log 
+
+
+    # Prepare success log message
+    - prepare_success_log:
+        steps:
+          - set_success_log_message:
+              assign:
+                - log_message: $${ "Workflow completed successfully"}
+
+
+      # Write message to log
+    - write_to_log:
+        steps:
+          - build_log_entry:
+              assign:
+                - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+                - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+                - workflow_result:
+                    status: $${ log_status }
+                    message: $${ log_message }
+                    elapsed_time: $${ time_elapsed + " seconds" }
+                    workflow_id: $${ this_workflow_id }
+                    email_recipient: $${ message_recipient }
+                    email_subject: $${ message_subject }
+                    email_body: $${ message_body }
+                    sendgrid_response: $${ sendgrid_result }
+          
+          - call_sys_log:
+              call: sys.log
+              args:
+                  severity: $${ log_status }
+                  json: $${ workflow_result }
+              next: exit
+
+
+      # Final step
+    - exit:
+        switch:
+          - condition: $${ log_status == "ERROR" }
+            raise: $${ workflow_result }
+          - condition: true
+            return: $${ workflow_result }

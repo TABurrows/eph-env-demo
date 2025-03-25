@@ -1,0 +1,282 @@
+# create.workflows.yaml
+main:
+
+  params: [args]
+  steps:
+
+  # Initialize
+  - initialize:
+      assign:
+        # Input Values
+        - registrant_email: $${ default( map.get(args, ["registrant_email"]), "MISSING" )}
+        - registrant_user: $${ default( map.get(args, ["registrant_user"]), "MISSING" )}
+        - lifespan_days: $${ default( map.get(args, ["lifespan_days"]), 7 )}
+        - project_display_name: $${ default( map.get(args, ["project_name"]), "MISSING" )}
+        # Static Values
+        - project_parent: $${"${eph_envs_folder_id}"}
+        - project_prefix: $${"${eph_envs_prefix}"}
+        - registration_status: $${"REQUESTED"}
+        # Dynamic Values
+        - event_formatted_time: $${ time.format(sys.now()) }
+        - this_project_number: $${ sys.get_env("GOOGLE_CLOUD_PROJECT_NUMBER") }
+        - this_project_id: $${ sys.get_env("GOOGLE_CLOUD_PROJECT_ID") }
+        - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+        # Use the workflow execution UID
+        - registration_id: $${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+        # - registration_id: $${uuid.generate()}
+        - create_api_call_response: $${ null }
+        # Firestore Values
+        - document: $${registration_id}
+        - datastore: $${ "projects/" + this_project_id + "/databases/(default)/documents/ephenvs" }
+        # Project Name Values
+        - date_stamp: $${text.substring(text.replace_all(time.format(sys.now()),"-",""),0,8)}
+        - project_suffix_a: $${text.substring(text.replace_all(registration_id,"-",""),0,6)}
+        - project_suffix_b: $${text.substring(text.replace_all(registration_id,"-",""),6,12)}
+        - proposed_project_id: $${project_prefix + "-" + date_stamp + "-" + project_suffix_a + "-" + project_suffix_b}
+        # Expiration Timestamp Values
+        - midnight_today_epoch: $${ time.parse(text.split(time.format(sys.now()),"T")[0] + "T23:59:59.000000Z") }
+        - lifespan_in_secs: $${lifespan_days * 24 * 60 * 60}
+        - expiration_timestamp: $${time.format(midnight_today_epoch + lifespan_in_secs)}
+        # Log Values
+        - registration_time: $${ "UNKNOWN" }
+        - registration_state: $${ "UNKNOWN" }
+        - now_timestamp: $${ sys.now() }
+        - log_status: $${ "INFO" }
+        - log_message: $${ "workflow started" }
+        - log_detail: null
+        - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+        - create_operation_id: null
+        - create_operation_detail: null
+        - workflow_result: null      
+
+
+
+  # Test input values
+  - test_input_values:
+      switch:
+        - condition: $${ registrant_email == "MISSING" }
+          assign:
+            - log_status: $${ "ERROR" }
+            - log_message: '$${ "Input value registrant_email is missing from request"}'
+          next: write_to_log
+        - condition: $${ registrant_user == "MISSING" }
+          assign:
+            - log_status: $${ "ERROR" }
+            - log_message: '$${ "Input value registrant_user is missing from request"}'
+          next: write_to_log
+        - condition: true
+          next: test_project_display_name
+
+
+
+  # Use the proposed project ID as the project name if absent
+  - test_project_display_name:
+      switch:
+        - condition: $${ project_display_name == "MISSING" }
+          assign:
+            - project_display_name: $${ proposed_project_id }
+
+
+
+  # Call Project Create API
+  - request_project_creation:
+      steps:
+        - call_project_create:
+            try:
+              call: googleapis.cloudresourcemanager.v3.projects.create
+              args:
+                body:
+                    displayName: $${ project_display_name }
+                    labels:
+                      registration_id: $${ registration_id }
+                    parent: $${ project_parent }
+                    projectId: $${ proposed_project_id }
+              result: create_api_call_response
+            except:
+              as: e
+              steps:
+                - handle_request_project_creation_exception:
+                    assign:
+                      - log_status: $${ "ERROR" }
+                      - log_message: '$${ "Caught exception trying to call the Project Create API" }'
+                      - log_detail:
+                          tags: $${ e.tags }
+                          message: $${ e.message }
+                          exception: $${ json.decode(json.encode_to_string(e)) }
+                    next: write_to_log
+
+        - extract_create_project_operation_id:
+            assign:
+              - create_operation_id: $${ default( map.get( create_api_call_response, "name" ), "MISSING" ) }
+              - create_operation_detail:  $${ create_api_call_response }
+
+        - test_create_project_operation_id:
+            switch:
+              - condition: $${ create_operation_id == "MISSING" }
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "Could not extract a Create Operation ID from Create Project API call" }'
+                next: write_to_log
+
+
+
+  # Write Details to Firestore creations collection
+  - write_details:
+      try:
+        call: googleapis.firestore.v1.projects.databases.documents.patch
+        args:
+          name: $${datastore + "/requests/creations/" + document}
+          body:
+            fields:
+              registrant_email:
+                stringValue: $${ registrant_email }
+              registrant_user:
+                stringValue: $${ registrant_user }
+              create_timestamp:
+                stringValue: $${ event_formatted_time }
+              registration_id:
+                stringValue: $${ registration_id }
+              execution_id:
+                stringValue: $${ execution_id }
+              create_operation_id:
+                stringValue: $${ create_operation_id }
+              registration_status:
+                stringValue: $${ registration_status }
+              requested_project_id:
+                stringValue: $${ proposed_project_id }
+              expiration_timestamp: 
+                stringValue: $${ expiration_timestamp }
+              ## Uncomment below for debug
+              # workflow_input:
+              #   stringValue: $${ json.encode_to_string(args) }
+              ## Uncomment below for debug
+              # create_operation_detail:
+              #   stringValue: $${ json.encode_to_string(create_operation_detail)}
+        result: register_project_request
+      except:
+        as: e
+        steps:
+          - handle_write_details_exception:
+              assign:
+                - log_status: $${ "ERROR" }
+                - log_message: '$${ "Failed to write request details to Firestore" }'
+                - log_detail:
+                    tags: $${ e.tags }
+                    message: $${ e.message }
+                    exception: $${ json.decode(json.encode_to_string(e)) }
+              next: write_to_log
+
+
+
+  # Wait for the new project_id to be registered in Firestore
+  - wait_for_project_registration:
+                
+      try:
+        steps:
+          - fetch_project_registration:
+              call: googleapis.firestore.v1.projects.databases.documents.get
+              args:
+                name: $${ datastore + "/registrations/projects/" + proposed_project_id }
+              result: firestore_registration_response
+          - extract_registration_values_if_present:
+              assign:
+                - registration_time: $${ default( map.get( firestore_registration_response, [ "createTime" ] ), "UNKNOWN" ) }
+                - registration_state: $${  default( map.get( firestore_registration_response, [ "fields", "registration_state", "stringValue" ]), "UNKNOWN" ) }
+                
+      retry:
+        predicate: $${ wait_for_project_registration_predicate }
+        max_retries: 4 
+        backoff:
+          initial_delay: 8
+          max_delay: 32
+          multiplier: 2
+
+      except:
+        as: e
+        steps:
+          - handle_wait_for_project_registration_details_exception:
+              assign:
+                - http_code: $${ default( map.get(e, [ "code" ] ), "UNKNOWN" ) }
+                - log_status: $${ "ERROR" }
+                - log_message: '$${ "Failed to get registrations details from Firestore after wait with HTTP Error Code " + http_code }'
+                - log_detail:
+                    tags: $${ e.tags }
+                    message: $${ e.message }
+                    exception: $${ json.decode(json.encode_to_string(e)) }
+              next: write_to_log
+
+
+
+  # Prepare success log message
+  - prepare_success_log:
+      steps:
+        - set_success_log_message:
+            assign:
+              - log_message: '$${ "Workflow execution " + execution_id + " completed successfully. Project " + proposed_project_id + " has been registered with state " + registration_state + "." }'
+
+
+
+  # Write message to log
+  - write_to_log:
+      steps:
+        - build_log_detail_if_empty:
+            switch:
+              - condition: $${ log_detail == null }
+                assign:
+                  - log_detail: '$${ log_status + ": " + log_message }'
+
+        - build_log_entry:
+            assign:
+              - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+              - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+              - workflow_result:
+                  status: $${ log_status }
+                  message: $${ log_message }
+                  detail: $${ log_detail }
+                  elapsed_time: $${ time_elapsed + " seconds" }
+                  workflow_id: $${ this_workflow_id }
+                  project_id: $${ proposed_project_id }
+                  registrant_email: $${ registrant_email }
+                  registrant_user: $${ registrant_user }
+                  registration_id: $${ registration_id }
+                  registration_time: $${ registration_time }
+                  registration_state: $${ registration_state }
+                  execution_id: $${ execution_id }
+                  create_operation_id: $${ create_operation_id }
+                  ## Uncomment below for debug
+                  # create_operation_detail: $${ create_operation_detail }
+                  ## Uncomment below for debug
+                  # workflow_input: $${ args }
+                  
+        - call_sys_log:
+            call: sys.log
+            args:
+                severity: $${ log_status }
+                json: $${ workflow_result }
+            next: exit
+
+
+  # Final step
+  - exit:
+      switch:
+        - condition: $${ log_status == "ERROR" }
+          raise: $${ workflow_result }
+        - condition: true
+          return: $${ workflow_result }
+
+
+
+# Retry predicate: subworkflow for capturing results from long-running operations
+#   return: true from this subworkflow if the test has not been satisfied
+#   return: false from this subworkflow if the test has been satisfied
+wait_for_project_registration_predicate:
+  params: [e]
+  steps:
+
+    - repeat_while_http_response_is_not_found:
+        switch:
+          - condition: $${ e.code == 404 }
+            return: true
+
+    - otherwise_break_return_successful:
+        return: false

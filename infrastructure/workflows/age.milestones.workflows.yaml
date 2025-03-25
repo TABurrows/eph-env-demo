@@ -1,0 +1,235 @@
+# age.milestones.workflows.yaml
+main:
+
+  params: [input]
+  steps:
+
+      # Initialize
+    - init:
+        assign:
+          # Dynamic Values
+          - this_location: $${ sys.get_env("GOOGLE_CLOUD_LOCATION") }
+          - this_project_id: $${ sys.get_env("GOOGLE_CLOUD_PROJECT_ID") }
+          - this_workflow_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_ID") }
+
+            # Firestore Values
+          - fetched_registrations_data: null
+          - registrations_collection: $${ "registrations" }
+          - firestore_datastore: $${ "projects/" + this_project_id + "/databases/(default)/documents/ephenvs"}
+          
+          # Init empty log line
+          - temp_log_line: $${ "" }
+
+          # Empty expired and unexpired lists
+          - expired_list: $${ [] }
+          - expired_count: 0
+          - unexpired_list: $${ [] }
+          - unexpired_count: 0
+          - erroring_list: $${ [] }
+          - erroring_count: 0
+          - registrations_count: 0
+          
+          # Workflow Values
+          - age_expirations_workflow_id: $${ "${age_expirations_workflow_id}" }
+          - age_notifications_workflow_id: $${ "${age_notifications_workflow_id}" }
+
+          # Log Values
+          - now_timestamp: $${ sys.now() }
+          - log_status: $${ "INFO" }
+          - log_message: $${ "workflow started" }
+          - log_detail: null
+          - execution_id: $${ sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID") }
+          - workflow_result: null
+
+
+    # Fetch registrations details from Firestore
+    - fetch_registrations_data:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.get
+          args:
+            name: $${ firestore_datastore + "/" + registrations_collection + "/projects" }
+          result: fetched_registrations_data
+        except:
+          as: e
+          steps:
+            - handle_fetch_registrations_data:
+                assign:
+                  - log_status: $${ "ERROR" }
+                  - log_message: '$${ "Could not get fetched_registrations_data with: " + json.encode_to_string(e)}'
+
+
+    # Extract registrations data fields from Firestore data
+    - extract_registrations_data:
+        steps:
+          - assign_values:
+              assign:
+                - fetched_projects: $${ list.concat( [], default( map.get(fetched_registrations_data, ["documents"]), [] ) ) }
+          - extract_projects:
+              for:
+                value: fetched_project
+                in: $${ fetched_projects }
+                steps:
+                  - extract_fields:
+                      for:
+                        value: project_fields
+                        in: $${ fetched_project }
+                        steps:
+
+                          - extract_values:
+                              assign:
+                                - registrant_email: $${ default( map.get( project_fields, ["fields","registrant_email","stringValue"]), "MISSING" )}
+                                - project_id: $${ default( map.get( project_fields, ["fields","project_id","stringValue"]), "MISSING" )}
+                                - expiry_timestamp: $${ default( map.get( project_fields, ["fields","expiration_timestamp","stringValue"]), "MISSING" )}
+                                - registration_id: $${ default( map.get( project_fields, ["fields","registration_id","stringValue"]), "MISSING" )}
+                                
+
+                            # TODO: add to erroring_list on exception
+                          - extract_expiry_epoch:
+                              try:
+                                assign:
+                                  - expiry_epoch: $${ time.parse(expiry_timestamp) }
+                              except:
+                                as: e
+                                steps:
+                                  - handle_expiry_conversion_error:
+                                      assign:
+                                        - log_status: $${ "ERROR" }
+                                        - log_message: '$${ "[" + project_id + "] could not extract an expiry epoch from the expiration timestamp of [" + json.encode_to_string(e) + "]"}'
+                                      
+                                  - write_expiry_conversion_error_to_log:
+                                      call: sys.log
+                                      args:
+                                          severity: $${ log_status }
+                                          data: $${ log_message }      
+                                          
+                          - build_project_object:
+                              assign:
+                                - project_object:
+                                    project_id: $${ project_id }
+                                    expiry_timestamp: $${ expiry_timestamp }
+                                    registration_id: $${ registration_id }
+                                    registrant_email: $${ registrant_email }                  
+
+                          - increment_registrations_counter:
+                              assign:
+                                - registrations_count: $${ registrations_count + 1 }
+
+                          - build_expired_unexpired_and_erroring_lists:
+                              switch:
+                                  # If any of these values are missing, then this is an error state
+                                - condition: $${ registrant_email == "MISSING" OR project_id == "MISSING" OR registrant_email == "MISSING" OR registration_id == "MISSING" }
+                                  assign:
+                                    - erroring_list: $${ list.concat(erroring_list, project_object)}
+                                    - erroring_count: $${ 1 + erroring_count }
+                                - condition: $${ now_timestamp > expiry_epoch }
+                                  assign:
+                                    - expired_list: $${ list.concat(expired_list, project_object) }
+                                    - expired_count: $${ 1 + expired_count }
+                                - condition: $${ now_timestamp <= expiry_epoch }
+                                  assign:
+                                    - unexpired_list: $${ list.concat(unexpired_list, project_object) }
+                                    - unexpired_count: $${ 1 + unexpired_count }
+                                  # All other states are error states
+                                - condition: true
+                                  assign:
+                                    - erroring_list: $${ list.concat(erroring_list, project_object) }
+
+
+    # Iterate over the expired list and call the relevant expiring workflow
+    - expire_expired_projects:
+        steps:
+          - iterate_over_expired_projects:
+              parallel:
+                for:
+                  value: project
+                  in: $${ expired_list}
+                  steps:
+                    - extract_expired_call_arguments:
+                        assign: 
+                          - expiry_timestamp: $${ project.expiry_timestamp }
+                          - project_id: $${ project.project_id }
+                          - registration_id: $${ project.registration_id }
+                    - call_age_expiration_workflow:
+                        # Call the Age Expirations Workflow - with "expiry_timestamp", "project_id", "registration_id"
+                        call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.run
+                        args:
+                          workflow_id: $${ age_expirations_workflow_id }
+                          location: $${ this_location }
+                          project_id: $${ this_project_id }
+                          argument:
+                            expiry_timestamp: $${ expiry_timestamp }
+                            project_id: $${ project_id }
+                            registration_id: $${ registration_id }
+
+
+    # Iterate over the unexpired list and call the relevant notifying workflow 
+    - notify_unexpired_projects:
+        steps:
+          - iterate_over_unexpired_projects:
+              parallel:
+                for:
+                  value: project
+                  in: $${ unexpired_list }
+                  steps:
+                    - extract_unexpired_call_arguments:
+                        assign:
+                          - expiry_timestamp: $${ project.expiry_timestamp }
+                          - project_id: $${ project.project_id }
+                          - registrant_email: $${ project.registrant_email }
+                    - call_age_notifications_workflow:
+                        # Call the Age Notifications Workflow - with "expiry_timestamp" "project_id" "registrant_email"
+                        call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.run
+                        args:
+                          workflow_id: $${ age_notifications_workflow_id }
+                          location: $${ this_location }
+                          project_id: $${ this_project_id }
+                          argument:
+                            expiry_timestamp: $${ expiry_timestamp }
+                            project_id: $${ project_id }
+                            registrant_email: $${ registrant_email }
+            
+
+    # Prepare success log message
+    - prepare_success_log:
+        steps:
+          - set_success_log_message:
+              assign:
+                - log_message: '$${ "Total Registrations: " + registrations_count + ", Total Expired: " + expired_count + ", Total Unexpired: " + unexpired_count + ", Total Erroring: " + erroring_count }'
+
+
+      # Write message to log
+    - write_to_log:
+        steps:
+          - build_log_entry:
+              assign:
+                - time_elapsed_split: $${ text.split("" + (sys.now() - now_timestamp), ".") }
+                - time_elapsed: $${ time_elapsed_split[0] + "." + text.substring(time_elapsed_split[1],0,5) }
+                - workflow_result:
+                    status: $${ log_status }
+                    message: $${ log_message }
+                    detail: $${ log_detail }
+                    elapsed_time: $${ time_elapsed + " seconds"}
+                    workflow_id: $${ this_workflow_id }
+                    execution_id: $${ execution_id }
+                    expired_total: $${ expired_count}
+                    expired_list: $${ expired_list }               
+                    unexpired_total: $${ unexpired_count }
+                    unexpired_list: $${ unexpired_list }
+                    erroring_total: $${ erroring_count }
+                    erroring_list: $${ erroring_list }
+                    registrations_total: $${ registrations_count }                      
+          - call_sys_log:
+              call: sys.log
+              args:
+                  severity: $${ log_status }
+                  json: $${ workflow_result }
+              next: exit
+
+
+      # Final step
+    - exit:
+        switch:
+          - condition: $${ log_status == "ERROR" or erroring_count > 0 }
+            raise: $${ workflow_result }
+          - condition: true
+            return: $${ workflow_result }
